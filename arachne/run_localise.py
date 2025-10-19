@@ -286,11 +286,11 @@ def sample_input_for_loc_sophis(
 
 
 def compute_FI_and_GL(
-	X, y,
-	indices_to_target,
-	target_weights,
-	is_multi_label = True, 
-	path_to_keras_model = None):
+        X, y,
+        indices_to_target,
+        target_weights,
+        is_multi_label = True,
+        path_to_keras_model = None):
 	"""
 	compute FL and GL for the given inputs
 	"""
@@ -614,11 +614,71 @@ def compute_FI_and_GL(
 	return total_cands
 
 
-def compute_output_per_w(x, h, t_w_kernel, t_w_recurr_kernel, const, with_norm = False): 
+def compute_sbfl_suspiciousness(fi, outcome, eps=1e-12):
+	"""Compute SBFL-inspired suspiciousness scores from FI participation and outcomes.
+
+	Args:
+		fi (np.ndarray): A matrix of shape ``(num_cases, num_elements)`` representing the
+			participation (forward impact) of each element for every analysed case.
+		outcome (np.ndarray): A vector of length ``num_cases`` where larger numbers indicate
+			the case exhibits more severe failure.
+		eps (float): Small constant used to avoid division-by-zero when combining terms.
+
+	Returns:
+		np.ndarray: Suspiciousness scores per element with the same ordering as the columns of
+			``fi``. Higher values imply a higher likelihood of being faulty.
+
+	The computation adapts spectrum-based fault localisation (SBFL) to continuous participation
+	and failure intensity values. Each case contributes to both the failing and passing spectra
+	proportionally to its outcome. The FI matrix is normalised per case to bound participation in
+	``[0, 1]`` before applying an Ochiai-like formula.
 	"""
-	A slice for a single neuron (unit or lstm cell)
-	x = (batch_size, time_steps, num_features)
-	h = (batch_size, time_steps, num_units)
+
+	fi = np.asarray(fi, dtype=float)
+	outcome = np.asarray(outcome, dtype=float)
+
+	if fi.ndim == 1:
+		fi = fi.reshape(-1, 1)
+	if fi.ndim != 2:
+		raise ValueError("fi must be a 2D array with shape (num_cases, num_elements)")
+	if outcome.ndim != 1:
+		raise ValueError("outcome must be a 1D array with length matching num_cases")
+	if fi.shape[0] != outcome.shape[0]:
+		raise ValueError("fi and outcome must have the same number of cases")
+
+	# Ensure non-negative outcome weights with 0 representing the weakest failure.
+	if np.any(outcome < 0):
+		outcome = outcome - outcome.min()
+
+	if np.allclose(outcome, 0):
+		return np.zeros(fi.shape[1])
+
+	# Normalise FI per case so that the strongest participation equals 1.0.
+	max_per_case = np.max(np.abs(fi), axis=1, keepdims=True)
+	max_per_case[max_per_case == 0] = 1.0
+	fi_norm = np.clip(fi / max_per_case, 0.0, 1.0)
+
+	failure_weight = outcome.reshape(-1, 1)
+	# Higher failure intensity implies lower "passing" contribution.
+	max_failure = failure_weight.max()
+	if max_failure == 0:
+		passing_weight = np.ones_like(failure_weight)
+	else:
+		passing_weight = max_failure - failure_weight
+
+	ef = np.sum(fi_norm * failure_weight, axis=0)
+	ep = np.sum(fi_norm * passing_weight, axis=0)
+	nf = np.sum((1.0 - fi_norm) * failure_weight, axis=0)
+
+	suspiciousness = ef / np.sqrt((ef + ep + eps) * (ef + nf + eps))
+	suspiciousness = np.nan_to_num(suspiciousness, nan=0.0, posinf=0.0, neginf=0.0)
+	return suspiciousness
+
+def compute_output_per_w(x, h, t_w_kernel, t_w_recurr_kernel, const, with_norm = False):
+	"""
+        A slice for a single neuron (unit or lstm cell)
+        x = (batch_size, time_steps, num_features)
+        h = (batch_size, time_steps, num_units)
 	t_w_kernel = (num_features,)
 	t_w_recurr_kernel = (num_units,)
 	consts = (batch_size, time_steps) -> the value that is multiplied in the final state computation
